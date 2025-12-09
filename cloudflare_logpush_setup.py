@@ -166,6 +166,178 @@ def create_logpush_job(zone_id, zone_name, dataset, headers):
         print(f"  [FAILED]  Request exception for {zone_name} - {dataset}: {e}", file=sys.stderr)
         return False
 
+def get_logpush_jobs(zone_id, headers):
+    """
+    Retrieves all logpush jobs for a specific zone.
+    Returns a list of job objects or empty list on error.
+    """
+    endpoint_url = f"{API_BASE_URL}/zones/{zone_id}/logpush/jobs"
+    
+    try:
+        response = requests.get(
+            endpoint_url,
+            headers=headers,
+            timeout=10
+        )
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if data.get('success'):
+            return data.get('result', [])
+        else:
+            print(f"  [ERROR] Failed to retrieve jobs for zone {zone_id}: {data.get('errors')}", file=sys.stderr)
+            return []
+            
+    except requests.exceptions.RequestException as e:
+        print(f"  [ERROR] Request exception while fetching jobs for zone {zone_id}: {e}", file=sys.stderr)
+        return []
+
+def disable_logpush_job(zone_id, zone_name, job_id, job_name, headers):
+    """
+    Disables a specific logpush job by setting enabled=false.
+    Returns True if successful, False otherwise.
+    """
+    endpoint_url = f"{API_BASE_URL}/zones/{zone_id}/logpush/jobs/{job_id}"
+    
+    payload = {
+        "enabled": False
+    }
+    
+    try:
+        response = requests.put(
+            endpoint_url,
+            headers=headers,
+            json=payload,
+            timeout=10
+        )
+        
+        response_data = response.json()
+        
+        if response.status_code == 200:
+            if response_data.get('success'):
+                print(f"  [SUCCESS] Disabled job '{job_name}' (ID: {job_id}) for zone {zone_name}")
+                return True
+            else:
+                print(f"  [FAILED]  Could not disable job {job_id} for {zone_name}. API Error: {response_data.get('errors')}", file=sys.stderr)
+                return False
+        else:
+            print(f"  [FAILED]  Error disabling job {job_id} for {zone_name} (HTTP {response.status_code}): {response.text}", file=sys.stderr)
+            return False
+            
+    except requests.exceptions.RequestException as e:
+        print(f"  [FAILED]  Request exception while disabling job {job_id} for {zone_name}: {e}", file=sys.stderr)
+        return False
+
+def delete_logpush_job(zone_id, zone_name, job_id, job_name, headers):
+    """
+    Deletes a specific logpush job permanently.
+    Returns True if successful, False otherwise.
+    """
+    endpoint_url = f"{API_BASE_URL}/zones/{zone_id}/logpush/jobs/{job_id}"
+    
+    try:
+        response = requests.delete(
+            endpoint_url,
+            headers=headers,
+            timeout=10
+        )
+        
+        response_data = response.json()
+        
+        if response.status_code == 200:
+            if response_data.get('success'):
+                print(f"  [SUCCESS] Deleted job '{job_name}' (ID: {job_id}) for zone {zone_name}")
+                return True
+            else:
+                print(f"  [FAILED]  Could not delete job {job_id} for {zone_name}. API Error: {response_data.get('errors')}", file=sys.stderr)
+                return False
+        else:
+            print(f"  [FAILED]  Error deleting job {job_id} for {zone_name} (HTTP {response.status_code}): {response.text}", file=sys.stderr)
+            return False
+            
+    except requests.exceptions.RequestException as e:
+        print(f"  [FAILED]  Request exception while deleting job {job_id} for {zone_name}: {e}", file=sys.stderr)
+        return False
+
+def disable_all_logpush_jobs(delete_jobs=False):
+    """
+    Disables (or optionally deletes) all logpush jobs from all zones 
+    accessible by the API token.
+    
+    Args:
+        delete_jobs: If True, permanently deletes jobs instead of just disabling them.
+    """
+    # Minimal validation - only need API token for this operation
+    if not API_TOKEN:
+        print("Error: CLOUDFLARE_API_TOKEN environment variable is not set.", file=sys.stderr)
+        sys.exit(1)
+    
+    api_headers = {
+        "Authorization": f"Bearer {API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    action_verb = "delete" if delete_jobs else "disable"
+    action_verb_present = "Deleting" if delete_jobs else "Disabling"
+    
+    print(f"\nFetching all zones...")
+    zones = get_all_zones(api_headers)
+    
+    if not zones:
+        print("No zones found or API error occurred. Exiting.")
+        sys.exit(1)
+    
+    print(f"Found {len(zones)} zones. {action_verb_present} all logpush jobs...\n")
+    
+    success_count = 0
+    failed_count = 0
+    total_jobs = 0
+    
+    for zone in zones:
+        zone_id = zone['id']
+        zone_name = zone['name']
+        
+        print(f"Processing zone: {zone_name} (ID: {zone_id})")
+        
+        # Get all logpush jobs for this zone
+        jobs = get_logpush_jobs(zone_id, api_headers)
+        
+        if not jobs:
+            print(f"  [INFO] No logpush jobs found for {zone_name}")
+            continue
+        
+        print(f"  Found {len(jobs)} logpush job(s)")
+        total_jobs += len(jobs)
+        
+        for job in jobs:
+            job_id = job.get('id')
+            job_name = job.get('name', 'unnamed')
+            job_enabled = job.get('enabled', False)
+            
+            # Skip if job is already disabled and we're not deleting
+            if not delete_jobs and not job_enabled:
+                print(f"  [SKIPPED] Job '{job_name}' (ID: {job_id}) is already disabled")
+                success_count += 1
+                continue
+            
+            if delete_jobs:
+                if delete_logpush_job(zone_id, zone_name, job_id, job_name, api_headers):
+                    success_count += 1
+                else:
+                    failed_count += 1
+            else:
+                if disable_logpush_job(zone_id, zone_name, job_id, job_name, api_headers):
+                    success_count += 1
+                else:
+                    failed_count += 1
+    
+    print("\n--- Summary ---")
+    print(f"Total logpush jobs found: {total_jobs}")
+    print(f"Successfully {action_verb}d: {success_count}")
+    print(f"Failed to {action_verb}: {failed_count}")
+    print("Script finished.")
+
 def main():
     """
     Main function to run the script.
@@ -209,4 +381,42 @@ def main():
     print("Script finished.")
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description='Cloudflare Logpush Job Management',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Create logpush jobs for all zones
+  python cloudflare_logpush_setup.py create
+  
+  # Disable all logpush jobs (keeps jobs, but stops them)
+  python cloudflare_logpush_setup.py disable
+  
+  # Delete all logpush jobs permanently
+  python cloudflare_logpush_setup.py delete
+        """
+    )
+    
+    parser.add_argument(
+        'action',
+        choices=['create', 'disable', 'delete'],
+        help='Action to perform: create new jobs, disable existing jobs, or delete existing jobs'
+    )
+    
+    args = parser.parse_args()
+    
+    if args.action == 'create':
+        main()
+    elif args.action == 'disable':
+        disable_all_logpush_jobs(delete_jobs=False)
+    elif args.action == 'delete':
+        # Add confirmation for delete
+        print("\n⚠️  WARNING: This will PERMANENTLY DELETE all logpush jobs!")
+        confirmation = input("Type 'DELETE' to confirm: ")
+        if confirmation == 'DELETE':
+            disable_all_logpush_jobs(delete_jobs=True)
+        else:
+            print("Delete operation cancelled.")
+            sys.exit(0)
